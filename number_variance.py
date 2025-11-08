@@ -3,6 +3,9 @@ from numba import jit
 import matplotlib.pyplot as plt
 from joblib import Parallel, delayed
 
+import grid_utils
+from tiling_utils import cf_forward_numba, cf_backward_numba, indexFn_numba
+
 # --- Snippet 1: Initial Variable Definitions ---
 
 tau = (1 + np.sqrt(5)) / 2  # Golden Ratio
@@ -22,20 +25,20 @@ orthos = np.stack([-e[:, 1], e[:, 0]], axis=1) # (Q, 2) array of orthogonal vect
 CaseName = "Penrose"
 ptsType = "Tiles"  # Using "Tiles" to match your final hypParameters snippet
 Rmax = 1000
-Rmin = 10
+Rmin = 1
 nn = 10**4
 nRends = 5000  # Note: 5000 renditions will take a long time!
-grids = np.arange(1, Q)  # [1, 2, 3, 4]
+grids = np.arange(Q)  # [1, 2, 3, 4]
 
 # Create 1-based index pairs
 index_pairs_list = []
-for i_idx in grids:
-    for j_idx in np.arange(i_idx + 1, Q + 1):
+for i_idx in grids[:-1]:
+    for j_idx in np.arange(i_idx + 1, Q):
         index_pairs_list.append((i_idx, j_idx))
 indexPairs = np.array(index_pairs_list)
 
 ShortCaseName = "Penrose"
-avgL = np.min(T)
+args = None
 
 seed = np.arange(1, nRends + 1)  # Creates the list of random seeds
 
@@ -57,27 +60,11 @@ radii = np.logspace(np.log10(Rmin), np.log10(Rmax), num=nn + 1)
 # You MUST change this to your intended value.
 gamma = 0.0
 
-def Xgen(seed_val):
-    """
-    Generates a deterministic X array
-    """
-    rng = np.random.default_rng(seed_val)
-    gammaTotal = gamma
-    gamma_vec = rng.uniform(-avgL, avgL, Q - 1)
-    
-    last_gamma = gammaTotal - np.sum(gamma_vec)
-    gamma_vec = np.append(gamma_vec, last_gamma)
-    
-    N_vals = np.arange(-Nmax, Nmax + 1)
-    
-    sum_arr = N_vals[:, np.newaxis] + gamma_vec[np.newaxis, :]
-    result = sum_arr * T[np.newaxis, :]
-    
-    return result.T
+Xgen = grid_utils.get_Xgen(CaseName, args, gamma, Nmax, T, Q)
 
 def get_centres(seed_val):
     """
-    Generates a deterministic centres point
+    Generates a deterministic centre point
     """
     rng = np.random.default_rng(seed_val)
     # Generate centres from the *same* seed for reproducibility
@@ -87,85 +74,9 @@ def get_centres(seed_val):
 # --- Snippets 2 & 3: Numba-JIT Helper Functions ---
 
 @jit(nopython=True)
-def cfForward(a, b):
-    """
-    Finds 0-based index of largest element in 'a' strictly LESS THAN 'b'.
-    """
-    return np.searchsorted(a, b, side='left') - 1
-
-@jit(nopython=True)
-def cfBackward(a, b):
-    """
-    Finds 0-based index of largest element in 'a' LESS THAN OR EQUAL TO 'b'.
-    """
-    return np.searchsorted(a, b, side='right') - 1
-
-@jit(nopython=True)
-def lowerIndex_numba(list_arr, target):
-    """
-    Finds the 0-based index *after* the last occurrence of 'target'.
-    This is a Numba-safe, 0-based implementation of your 'lowerIndex' logic
-    """
-    return np.searchsorted(list_arr, target, side='right')
-
-@jit(nopython=True)
-def upperIndex_numba(list_arr, target):
-    """
-    Finds the 0-based index *of the first* occurrence of 'target'.
-    This is a Numba-safe, 0-based implementation of your 'upperIndex' logic
-    """
-    return np.searchsorted(list_arr, target, side='left')
-
-@jit(nopython=True)
-def indexFn_numba(qtuples_indices, min_val, max_val, values):
-    """
-    (FIXED: This version correctly calls the Numba-safe helper 
-    functions for both forward and reverse-sorted lists.)
-    """
-    m = qtuples_indices.shape[0]
-    if m == 0:
-        return (0, -1) # Return invalid slice
-
-    n = qtuples_indices.shape[1]
-    current_lower = 0       # Start with the full slice
-    current_upper = n - 1   # (inclusive)
-
-    for ii in range(m):
-        ll = qtuples_indices[ii, :]
-        
-        # --- Find the local bounds for this list (ll) ---
-        local_lower = 0
-        local_upper = n - 1
-        
-        if values[ii] > 0.: # Forward-sorted
-            # Find index *after* last 'min_val'
-            local_lower = lowerIndex_numba(ll, min_val)
-            # Find index *of first* 'max_val'
-            local_upper = upperIndex_numba(ll, max_val) - 1
-        
-        else: # Reverse-sorted
-            # Find index *after* last 'max_val'
-            local_lower = qtuples_indices.shape[1] - upperIndex_numba(np.flip(ll), max_val)
-            # Find index *of first* 'min_val'
-            local_upper = qtuples_indices.shape[1] - lowerIndex_numba(np.flip(ll), min_val) - 1
-        
-        # --- Intersect the bounds ---
-        if local_lower > current_lower:
-            current_lower = local_lower
-        if local_upper < current_upper:
-            current_upper = local_upper
-
-        # Check for non-intersection
-        if current_lower > current_upper:
-            return (0, -1) # Return invalid slice
-            
-    # Return the final, intersected (inclusive) bounds
-    return (current_lower, current_upper)
-
-@jit(nopython=True)
 def matchRadius_numba(a, b):
     """
-    Your JIT-compiled linear scan histogram.
+    Linear scan histogram.
     """
     n_bins = a.shape[0] + 1
     n_vals = b.shape[0]
@@ -181,28 +92,9 @@ def matchRadius_numba(a, b):
         idx[i] += 1
     return idx
 
-# ---
-# --- This is the ASYMMETRIC countFn ---
-# ---
 @jit(nopython=True)
-def countFn(i_in, j_in, X, centres, radii, e, etrans, orthos, Q, Nmax):
-    i = i_in - 1
-    j = j_in - 1
-    """
-    (FINAL CORRECTED VERSION)
-    This version is SYMMETRIC and has all indexing bugs fixed.
-    """
-    '''
-    # --- FIX 1: Make the function symmetric ---
-    if i_in < j_in:
-        i_min_in = i_in
-        i_max_in = j_in
-    else:
-        i_min_in = j_in
-        i_max_in = i_in
-    i = i_min_in - 1
-    j = i_max_in - 1
-    '''
+def countFn(i, j, X, centres, radii, e, etrans, orthos, Q, Nmax):
+
     n_lines = 2 * Nmax - 1
     n_radii = radii.shape[0]
     
@@ -243,7 +135,6 @@ def countFn(i_in, j_in, X, centres, radii, e, etrans, orthos, Q, Nmax):
     for nn in range(1, n_lines + 1):
         Qtuples[i, :] = nn + 0.5
         
-        # --- FIX 2: Correct 1-based indexing ---
         X_i_val = X[i, nn]
         
         proj = coeffs1.reshape(-1, 1) * X_i_val + term2
@@ -253,13 +144,12 @@ def countFn(i_in, j_in, X, centres, radii, e, etrans, orthos, Q, Nmax):
             k_idx = indices[k]
             X_k = X[k_idx, :]
             if values[k] > 0.:
-                Qtuples[k_idx, :] = cfForward(X_k, proj[k, :])
+                Qtuples[k_idx, :] = cf_forward_numba(X_k, proj[k, :])
             else:
-                Qtuples[k_idx, :] = cfBackward(X_k, proj[k, :])
+                Qtuples[k_idx, :] = cf_backward_numba(X_k, proj[k, :])
             qtuples_sub_array[k, :] = Qtuples[k_idx, :]
         
-        # --- FIX 3: Correct min_val for invalid ordinals ---
-        # This call now uses the NEW, fixed indexFn_numba
+        # --- Find the min_val for invalid ordinals ---
         lower, upper = indexFn_numba(qtuples_sub_array, -1, 2*Nmax, values)
 
         # ---
@@ -277,43 +167,36 @@ def countFn(i_in, j_in, X, centres, radii, e, etrans, orthos, Q, Nmax):
 
 # --- Snippet 5: 'hypParameters' and its Helper (Serial Version) ---
 
-def _run_rendition(s, indexPairs, radii, e, etrans, orthos, Q, Nmax):
+def _run_rendition(s, indexPairs, radii, e, etrans, orthos, Q, Nmax, gamma):
     """
     Helper function to run a single "rendition" (one seed).
     This is what will be executed in parallel.
     """
-    # Xgen now correctly receives gamma
     X = Xgen(s) 
     rng = np.random.default_rng(s)
     centres = rng.uniform(-1.0, 1.0, 2)
     
     total_counts = np.zeros(len(radii), dtype=np.int64)
     
-    # This loop is correct (10 pairs) because countFn is symmetric
     for pair in indexPairs:
-        i_in = pair[0]
-        j_in = pair[1]
+        i = pair[0]
+        j = pair[1]
         
-        total_counts += countFn(
-            i_in, j_in, X, centres, radii, e, etrans, orthos, Q, Nmax
-        )
+        total_counts += countFn(i, j, X, centres, radii, e, etrans, orthos, Q, Nmax)
     return total_counts
 
 # ---
 # --- FIX 3: Modify hypParameters to use joblib.Parallel ---
 # ---
-def hypParameters(seed_array, indexPairs, radii, e, etrans, orthos, Q, Nmax, Rmax):
-    """
-    Python version of 'hypParameters' (PARALLEL VERSION).
-    """
-    
+def hypParameters(seed_array, indexPairs, radii, e, etrans, orthos, Q, Nmax, Rmax, gamma):
+
     print(f"Running {len(seed_array)} renditions in *parallel* (using all cores)...")
     
     # --- PARALLEL EXECUTION ---
     # n_jobs=-1 uses all available cores
     # We pass all necessary arguments to the delayed function
     rawData_list = Parallel(n_jobs=-1)(
-        delayed(_run_rendition)(s, indexPairs, radii, e, etrans, orthos, Q, Nmax) 
+        delayed(_run_rendition)(s, indexPairs, radii, e, etrans, orthos, Q, Nmax, gamma) 
         for s in seed_array
     )
     # --- END PARALLEL EXECUTION ---
@@ -350,6 +233,9 @@ if __name__ == "__main__":
     
     print(f"Starting calculation with {len(seed)} renditions...")
 
+    import time
+    start_time = time.time()
+
     # This is the line you wanted to run:
     outputs = hypParameters(
         seed, 
@@ -360,10 +246,15 @@ if __name__ == "__main__":
         orthos, 
         Q, 
         Nmax, 
-        Rmax
+        Rmax,
+        gamma
     )
-    
+
+    end_time = time.time()    
+
     print("\n--- Finished ---")
+    print(f"Time taken: {end_time - start_time} seconds")
+
     print("Output shape:", outputs.shape)
 
     # Export as csv file
