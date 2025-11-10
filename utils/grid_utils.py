@@ -1,6 +1,6 @@
 import numpy as np
 
-def get_Xgen(name, args, gamma, Nmax, T, Q):
+def get_Xgen(name, args, gamma, Nmax, e):
     """
     Initializes the Xgen function for a given case name.
     """
@@ -8,6 +8,9 @@ def get_Xgen(name, args, gamma, Nmax, T, Q):
     #-------------------------------------------------#
     #------------ Penrose Initialization -------------#
     
+    Q = e.shape[0]
+    T = 1.0 / np.linalg.norm(e, axis=1)  # (Q,) array of period lengths
+
     if name == "Penrose":
 
         avgL = min(T)
@@ -27,39 +30,12 @@ def get_Xgen(name, args, gamma, Nmax, T, Q):
 
             return result.T
 
-    #-------------------------------------------------#
-    #----------- Perturbed Integer Lattice -----------#
-
-    elif name == "Perturbed Integer Lattice":
-
-        avgL = min(T)
-        ll = args
-
-        def Xgen(seed_val):
-
-            # Set gamma offsets
-
-            rng = np.random.default_rng(seed_val)
-            gamma_vec = rng.uniform(-avgL, avgL, Q - 1)
-
-            last_gamma = gamma - np.sum(gamma_vec)
-            gamma_vec = np.append(gamma_vec, last_gamma)
-
-            # Get spacings
-
-            N_vals = np.arange(-Nmax, Nmax + 1)
-
-            sum_arr = N_vals[:, np.newaxis] + gamma_vec[np.newaxis, :]
-            result = (sum_arr + np.random.uniform(-ll, ll, size=[Q, 2 * Nmax + 1])) * T[np.newaxis, :]
-
-            return result.T
-
     #--------------------------------------------------#
     #------------- Poisson Initialization -------------#
 
     elif name == "Poisson":
 
-        avgL = min(T)/2
+        avgL = min(T) / 2
         seq_len = 2 * Nmax + 1
 
         def Xgen(seed_val):
@@ -77,7 +53,34 @@ def get_Xgen(name, args, gamma, Nmax, T, Q):
             xArray = rng.uniform(-Nmax / 2, Nmax / 2, size=(Q, seq_len))
             xArray = np.sort(xArray, axis=1)
             x0 = gamma_vec - np.median(xArray, axis=1)
-            result = T * (x0[:, None] + xArray)
+            result = (x0[:, None] + xArray) * T[:, None]
+
+            return result
+
+    #-------------------------------------------------#
+    #----------- Perturbed Integer Lattice -----------#
+
+    elif name == "Perturbed Integer Lattice":
+
+        ll = args[0]
+        avgL = min(T)
+
+        def Xgen(seed_val):
+
+            # Set gamma offsets
+
+            rng = np.random.default_rng(seed_val)
+            gamma_vec = rng.uniform(-avgL, avgL, Q - 1)
+
+            last_gamma = gamma - np.sum(gamma_vec)
+            gamma_vec = np.append(gamma_vec, last_gamma)
+
+            # Get spacings
+
+            N_vals = np.arange(-Nmax, Nmax + 1)
+
+            sum_arr = N_vals[:, np.newaxis] + gamma_vec[np.newaxis, :]
+            result = (sum_arr + np.random.uniform(-ll, ll, size=[2 * Nmax + 1, Q])) * T[np.newaxis, :]
 
             return result.T
 
@@ -124,14 +127,14 @@ def get_Xgen(name, args, gamma, Nmax, T, Q):
 
             # Get spacings
 
-            starts = rng.randint(0, max_len - seq_len + 1, size=Q)
+            starts = rng.integers(0, max_len - seq_len + 1, size=Q)
             offsets = np.arange(seq_len)
             spacings = spac[starts[:, None] + offsets[None, :]]
             xArray = np.cumsum(spacings, axis=1)
             x0 = gamma_vec - np.median(xArray, axis=1)
-            result = T * (x0[:, None] + xArray)
+            result = (x0[:, None] + xArray) * T[:, None]
 
-            return result.T
+            return result
 
     #---------------------------------------------------#
     #----------------- 2-Length Random -----------------#
@@ -159,13 +162,13 @@ def get_Xgen(name, args, gamma, Nmax, T, Q):
 
             # Get spacings
 
-            spacings = np.random.choice(lengths, size=(Q, seq_len), p=weights)
+            spacings = rng.choice(lengths, size=(Q, seq_len), p=weights)
             xArray = np.cumsum(spacings, axis=1)
             x0 = gamma_vec - np.median(xArray, axis=1)
 
-            result = T * (x0[:, None] + xArray)
+            result = (x0[:, None] + xArray) * T[:, None]
 
-            return result.T
+            return result
 
     else:
         raise ValueError(f"Invalid case name: {name}")
